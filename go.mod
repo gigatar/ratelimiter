@@ -1,4 +1,4 @@
-module github.com/gigatar/rateLimiter
+module github.com/gigatar/ratelimiter
 
 go 1.24.2
 
