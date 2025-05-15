@@ -30,66 +30,104 @@ func DefaultConfig() *Config {
 	}
 }
 
-var (
-	visitors = make(map[string]*visitor)
-	mx       sync.Mutex
+// Validate ensures the configuration has valid values
+func (c *Config) Validate() {
+	if c.RequestsPerSecond <= 0 {
+		c.RequestsPerSecond = 1
+	}
+	if c.Burst <= 0 {
+		c.Burst = 5
+	}
+	if c.CleanupInterval <= 0 {
+		c.CleanupInterval = time.Minute
+	}
+	if c.MaxIdleTime <= 0 {
+		c.MaxIdleTime = 3 * time.Minute
+	}
+}
+
+// RateLimiter represents a rate limiter instance
+type RateLimiter struct {
 	config   *Config
-)
+	visitors map[string]*visitor
+	mx       sync.Mutex
+}
 
 type visitor struct {
 	limiter  *rate.Limiter
 	lastSeen time.Time
 }
 
-// Initialize sets up the rate limiter with the given configuration
-func Initialize(cfg *Config) {
+// New creates a new RateLimiter instance with the given configuration
+func New(cfg *Config) *RateLimiter {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
-	config = cfg
-	go cleanupVisitors()
+	cfg.Validate()
+
+	rl := &RateLimiter{
+		config:   cfg,
+		visitors: make(map[string]*visitor),
+	}
+
+	go rl.cleanupVisitors()
+	return rl
 }
 
-func getVisitor(ip string) *rate.Limiter {
-	mx.Lock()
-	defer mx.Unlock()
+// getVisitor returns or creates a rate limiter for the given IP
+func (rl *RateLimiter) getVisitor(ip string) *rate.Limiter {
+	rl.mx.Lock()
+	defer rl.mx.Unlock()
 
-	v, exists := visitors[ip]
+	v, exists := rl.visitors[ip]
 	if !exists {
-		limiter := rate.NewLimiter(rate.Limit(config.RequestsPerSecond), config.Burst)
-		visitors[ip] = &visitor{limiter: limiter, lastSeen: time.Now()}
+		limiter := rate.NewLimiter(rate.Limit(rl.config.RequestsPerSecond), rl.config.Burst)
+		rl.visitors[ip] = &visitor{limiter: limiter, lastSeen: time.Now()}
 		return limiter
 	}
 	v.lastSeen = time.Now()
 	return v.limiter
 }
 
-func cleanupVisitors() {
+// cleanupVisitors periodically removes inactive visitors
+func (rl *RateLimiter) cleanupVisitors() {
 	for {
-		time.Sleep(config.CleanupInterval)
-		mx.Lock()
-		for ip, v := range visitors {
-			if time.Since(v.lastSeen) > config.MaxIdleTime {
-				delete(visitors, ip)
+		time.Sleep(rl.config.CleanupInterval)
+		rl.mx.Lock()
+		for ip, v := range rl.visitors {
+			if time.Since(v.lastSeen) > rl.config.MaxIdleTime {
+				delete(rl.visitors, ip)
 			}
 		}
-		mx.Unlock()
+		rl.mx.Unlock()
 	}
 }
 
-// RateLimitMiddleware creates a new rate limiting middleware
-func RateLimitMiddleware(next http.Handler) http.Handler {
-	if config == nil {
-		Initialize(DefaultConfig())
-	}
-
+// Middleware creates a new rate limiting middleware
+func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := r.RemoteAddr
-		limiter := getVisitor(ip)
+		limiter := rl.getVisitor(ip)
 		if !limiter.Allow() {
 			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Global instance for backward compatibility
+var globalLimiter *RateLimiter
+
+// Initialize sets up the global rate limiter instance
+func Initialize(cfg *Config) {
+	globalLimiter = New(cfg)
+}
+
+// RateLimitMiddleware creates a new rate limiting middleware using the global instance
+func RateLimitMiddleware(next http.Handler) http.Handler {
+	if globalLimiter == nil {
+		Initialize(DefaultConfig())
+	}
+	return globalLimiter.Middleware(next)
 }

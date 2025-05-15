@@ -9,6 +9,7 @@ A simple and configurable rate limiter middleware for Go HTTP servers. This libr
 - Automatic cleanup of inactive visitors
 - Thread-safe implementation
 - Easy to use middleware pattern
+- Support for both global and instance-based usage
 
 ## Installation
 
@@ -18,7 +19,7 @@ go get github.com/gigatar/ratelimiter
 
 ## Usage
 
-### Basic Usage
+### Using Global Instance (Simple)
 
 ```go
 package main
@@ -46,16 +47,37 @@ func main() {
 }
 ```
 
-### Custom Configuration
+### Using Instance-Based Approach (Recommended)
 
 ```go
-config := &ratelimiter.Config{
-    RequestsPerSecond: 10,    // Allow 10 requests per second
-    Burst: 20,                // Allow bursts of up to 20 requests
-    CleanupInterval: 2 * time.Minute,  // Run cleanup every 2 minutes
-    MaxIdleTime: 5 * time.Minute,      // Remove visitors after 5 minutes of inactivity
+package main
+
+import (
+    "net/http"
+    "time"
+    
+    "github.com/gigatar/ratelimiter"
+)
+
+func main() {
+    // Create a new rate limiter instance with custom configuration
+    limiter := ratelimiter.New(&ratelimiter.Config{
+        RequestsPerSecond: 10,    // Allow 10 requests per second
+        Burst: 20,                // Allow bursts of up to 20 requests
+        CleanupInterval: 2 * time.Minute,  // Run cleanup every 2 minutes
+        MaxIdleTime: 5 * time.Minute,      // Remove visitors after 5 minutes of inactivity
+    })
+    
+    // Your handler
+    handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte("Hello, World!"))
+    })
+    
+    // Apply rate limiting middleware
+    http.Handle("/", limiter.Middleware(handler))
+    
+    http.ListenAndServe(":8080", nil)
 }
-ratelimiter.Initialize(config)
 ```
 
 ## Configuration Options
@@ -91,6 +113,27 @@ When a request exceeds the rate limit, the middleware will:
 ## Thread Safety
 
 The rate limiter is thread-safe and can be used in concurrent environments. It uses a mutex to protect the visitor map and rate limiter operations.
+
+## Multiple Instances
+
+The library supports creating multiple rate limiter instances, which is useful when you need different rate limits for different parts of your application:
+
+```go
+// Create different rate limiters for different endpoints
+apiLimiter := ratelimiter.New(&ratelimiter.Config{
+    RequestsPerSecond: 10,
+    Burst: 20,
+})
+
+adminLimiter := ratelimiter.New(&ratelimiter.Config{
+    RequestsPerSecond: 2,
+    Burst: 5,
+})
+
+// Apply different rate limits to different routes
+http.Handle("/api/", apiLimiter.Middleware(apiHandler))
+http.Handle("/admin/", adminLimiter.Middleware(adminHandler))
+```
 
 ## License
 
