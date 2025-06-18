@@ -1,7 +1,9 @@
 package ratelimiter
 
 import (
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,10 +40,10 @@ func (c *Config) Validate() {
 	if c.Burst <= 0 {
 		c.Burst = 5
 	}
-	if c.CleanupInterval <= 0 {
+	if c.CleanupInterval < time.Second {
 		c.CleanupInterval = time.Minute
 	}
-	if c.MaxIdleTime <= 0 {
+	if c.MaxIdleTime < time.Second {
 		c.MaxIdleTime = 3 * time.Minute
 	}
 }
@@ -91,11 +93,11 @@ func (rl *RateLimiter) getVisitor(ip string) *rate.Limiter {
 
 // cleanupVisitors periodically removes inactive visitors
 func (rl *RateLimiter) cleanupVisitors() {
-	for {
-		time.Sleep(rl.config.CleanupInterval)
+	ticker := time.NewTicker(rl.config.CleanupInterval)
+	for range ticker.C {
 		rl.mx.Lock()
 		for ip, v := range rl.visitors {
-			if time.Since(v.lastSeen) > rl.config.MaxIdleTime {
+			if time.Since(v.lastSeen) >= rl.config.MaxIdleTime {
 				delete(rl.visitors, ip)
 			}
 		}
@@ -106,7 +108,7 @@ func (rl *RateLimiter) cleanupVisitors() {
 // Middleware creates a new rate limiting middleware
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := r.RemoteAddr
+		ip := getClientIP(r)
 		limiter := rl.getVisitor(ip)
 		if !limiter.Allow() {
 			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
@@ -130,4 +132,27 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 		Initialize(DefaultConfig())
 	}
 	return globalLimiter.Middleware(next)
+}
+
+// getClientIP is a helper function to get the IP even when passed through proxies
+func getClientIP(r *http.Request) string {
+	// X-Forwarded-For may contain multiple IPs, like: "client, proxy1, proxy2"
+	xForwardedFor := r.Header.Get("X-Forwarded-For")
+	if xForwardedFor != "" {
+		// Take the first IP in the list
+		ips := strings.Split(xForwardedFor, ",")
+		return strings.TrimSpace(ips[0])
+	}
+
+	// Fallback to X-Real-IP (used by some proxies)
+	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+		return realIP
+	}
+
+	// Final fallback: remote addr (proxy IP)
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr // if can't split, just return raw
+	}
+	return host
 }
